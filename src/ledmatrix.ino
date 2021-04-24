@@ -10,6 +10,8 @@
 // Needs to be manually downloaded and installed
 // https://github.com/2dom/PxMatrix
 #include <ESP8266WiFi.h>
+// increase MQTT message size
+#define MQTT_MAX_PACKET_SIZE 512
 #include <PubSubClient.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
@@ -20,23 +22,14 @@
 #include "config.h"
 
 String mqtt_base_path = HOSTNAME;
-const char* pub_msg = "Get Data";
-String mqtt_pub_str = mqtt_base_path + "/Status";
-int path_len = 1;
+String mqtt_topic_cmd = mqtt_base_path + "/cmd";
+String mqtt_topic_state = mqtt_base_path + "/state";
 
-unsigned long previousMillis;
-
-String temperatur;
-String feuchtigkeit;
-String zeit;
-String msg_str;
-
-#define MSG_BUFFER_SIZE  (50)
-char msg[MSG_BUFFER_SIZE];
-
-int status;
 int pos_x = 0;
 int pos_y = 0;
+int pos_x2 = 0;
+int pos_y2 = 0;
+int textSize = 1;
 uint8_t brightness = 40;
 float value = 0;
 
@@ -70,9 +63,11 @@ Ticker display_ticker;
 #define P_OE 2
 #define P_D 12
 #define P_E 0
+// Pin for button (P_E not used)
+#define P_BTN 0
 
 // PxMATRIX display(32,16,P_LAT, P_OE,P_A,P_B,P_C);
- PxMATRIX display(64,32,P_LAT, P_OE,P_A,P_B,P_C,P_D);
+PxMATRIX display(64, 32, P_LAT, P_OE, P_A, P_B, P_C, P_D);
 //PxMATRIX display(64, 32, P_LAT, P_OE, P_A, P_B, P_C, P_D, P_E);
 
 // Some standard colors
@@ -84,22 +79,30 @@ uint16_t myWHITE = display.color565(255, 255, 255);
 uint16_t myYELLOW = display.color565(255, 255, 0);
 uint16_t myCYAN = display.color565(0, 255, 255);
 uint16_t myMAGENTA = display.color565(255, 0, 255);
+uint16_t myORANGE = display.color565(255, 127, 127);
 uint16_t myBLACK = display.color565(0, 0, 0);
 uint16_t currentCOLOR = myWHITE;
 uint16_t valueCOLOR_Temp = myWHITE;
 uint16_t valueCOLOR_Hum = myWHITE;
 uint16_t valueCOLOR_CO = myWHITE;
 
-uint16 myCOLORS[8] = {myRED, myGREEN, myBLUE, myWHITE, myYELLOW, myCYAN, myMAGENTA, myBLACK};
-String colorNames[8] = { "red", "green", "blue", "white", "yellow", "cyan", "magenta", "black"};
+uint16 myCOLORS[9] = {myRED, myGREEN, myBLUE, myWHITE, myYELLOW, myCYAN, myMAGENTA, myORANGE, myBLACK};
+String colorNames[9] = { "red", "green", "blue", "white", "yellow", "cyan", "magenta", "orange", "black"};
 
 uint16 get_color(String name) {
-  uint16_t color = myWHITE;
-  for (int i = 0; i < 8; i++) {
-    if (colorNames[i] == name) {
-      color = myCOLORS[i];
+  uint16_t color = 255;
+  for (uint16_t i = 0; i < 9; i++) {
+    if ((colorNames[i] == name) || (colorNames[i].substring(0,1) == name)) {
+      color = i;
       break;
     }
+  }
+  if (color == 255) {
+    unsigned int r, g, b;
+    sscanf(name.c_str(), "#%02X%02X%02X", &r, &g, &b);
+    color = display.color565(r, g, b);
+  } else {
+    color = myCOLORS[color];
   }
   return color;
 }
@@ -111,86 +114,88 @@ void display_updater() {
 
 //MQTT DATEN IN VARIABLEN SCHREIBEN
 void callback(char* topic, byte* payload, unsigned int length) {
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<512> doc;
   deserializeJson(doc, payload, length);
 
+  Serial.printf("doc size = %d, len = %d\n", doc.size(), length);    
+
   // Json Object processing
-  String doc_x = doc["x"];
-  pos_x = doc_x.toInt();
-  String doc_y = doc["y"];
-  pos_y = doc_y.toInt();
-  String Color = doc["color"];
-  String Text = doc["text"];
-  int textSize = doc["textSize"];
-  String br = doc["brightness"];
-  brightness = br.toInt();
-  String Command = doc["command"];
+  for (int i = 0; i < 5; i++) {
+    String Command = doc["cmd"][i];
+    if (Command == "null") {
+      break;
+    }
+    Serial.printf("cmd = %s\n", Command.c_str());    
+    String doc_x = doc["x"][i];
+    pos_x = 0;
+    if (doc_x != "null") {
+      pos_x = doc_x.toInt();
+    }
+    pos_y = 0;
+    String doc_y = doc["y"][i];
+    if (doc_y != "null") {
+      pos_y = doc_y.toInt();
+    }
+    String doc_x2 = doc["x2"][i];
+    if (doc_x2 != "null") {
+      pos_x2 = doc_x2.toInt();
+    }
+    String doc_y2 = doc["y2"][i];
+    if (doc_y2 != "null") {
+      pos_y2 = doc_y2.toInt();
+    }
+    String Color = doc["col"][i];
+    if(Color != "null") {
+      Serial.printf("color = %s\n", Color.c_str());
+      currentCOLOR = get_color(Color);
+    }
+    String doc_textSize = doc["size"][i];
+    if (doc_textSize != "null") {
+      textSize = doc_textSize.toInt();
+      Serial.printf("size = %d\n", textSize);
+    }
+    String Text = doc["txt"][i];
+    String Value = doc["val"][i];
+    int value = 0;
+    if (Value != "null") {
+      value = Value.toInt();
+    }
 
-  if(Command != "null") {
-    Serial.printf("command = %s\n", Command.c_str());    
-    if(Command == "clear") {
-      status = 0;
-      Serial.print("Status = 0");
+    if(Command == "clr") {
       display.fillRect(0, 0, 64, 32, myBLACK);
+    } else if(Command == "brt") {
+      Serial.printf("brightness = %d\n", value);
+      display.setBrightness(value);
     }
-    Command = "";
-    send_message();
-  }
-
-  if(Color != "null") {
-    Serial.printf("color = %s\n", Color.c_str());
-    currentCOLOR = get_color(Color);
-  }
-
-  if(Text == "null") {
-    display.drawPixel(pos_x, pos_y, currentCOLOR);
-  } else {
-    Serial.printf("text = %s\n", Text.c_str());
-    Serial.printf("X = %d\n", pos_x);
-    Serial.printf("Y = %d\n", pos_y);
-    display.setCursor(pos_x, pos_y);
-    display.setTextColor(currentCOLOR, myBLACK);
-    if (textSize == 2){
-      display.fillRect(pos_x, 0, 60 - pos_x, pos_y + 7, myBLACK);
-      display.setFont(&FreeSans9pt7b);
-    } else {
-      display.setFont();
+    if(Command == "pnt") {
+      Serial.printf("pnt(%d,%d)\n", pos_x, pos_y);    
+      display.drawPixel(pos_x, pos_y, currentCOLOR);
+    } else if (Command == "fil") {
+      Serial.printf("fil(%d,%d,%d,%d)\n", pos_x, pos_y, pos_x2 - pos_x, pos_y2 - pos_y);
+      display.fillRect(pos_x, pos_y, pos_x2 - pos_x, pos_y2 - pos_y, currentCOLOR);
+    } else if (Command == "gau") {
+      Serial.printf("gauge(%d,%d,%d,%d)\n", pos_x, pos_y, pos_x2, pos_y2);
+      display.fillRect(pos_x, pos_y, pos_x2 - pos_x + 1, pos_y2 - pos_y + 1, myBLACK);
+      display.fillRect(pos_x, pos_y, value, pos_y2 - pos_y + 1, currentCOLOR);
+    } else if (Command == "line") {
+      Serial.printf("lin(%d,%d,%d,%d)\n", pos_x, pos_y, pos_x2, pos_y2);
+      display.drawLine(pos_x, pos_y, pos_x2, pos_y2, currentCOLOR);
+    } else if (Command == "rct") {
+      Serial.printf("rct(%d,%d,%d,%d)\n", pos_x, pos_y, pos_x2 - pos_x, pos_y2 - pos_y);
+      display.drawRect(pos_x, pos_y, pos_x2 - pos_x, pos_y2 - pos_y, currentCOLOR);
+    } else if (Command == "txt") {
+      Serial.printf("txt(%d,%d,%s)\n", pos_x, pos_y, Text.c_str());
+      display.setCursor(pos_x, pos_y);
+      display.setTextColor(currentCOLOR, myBLACK);
+      if (textSize == 2) {
+        display.fillRect(pos_x, 0, 60 - pos_x, pos_y + 7, myBLACK);
+        display.setFont(&FreeSans9pt7b);
+      } else {
+        display.setFont();
+      }
+      display.print(Text);
     }
-    display.print(Text);
-    // scroll_text(1,100,Text,96,96,250);
-    Text = "";
   }
-
-  if(brightness > 0) {
-    Serial.printf("Helligkeit = %d\n", brightness);
-    display.setBrightness(brightness);
-    brightness = 0;
-  }
-}
-
-void scroll_text(uint8_t ypos, unsigned long scroll_delay, String text, uint8_t colorR, uint8_t colorG, uint8_t colorB) {
-    uint16_t text_length = text.length();
-    int matrix_width = 64;
-    display.setTextWrap(false);  // we don't wrap text so it scrolls nicely
-    display.setTextColor(display.color565(colorR,colorG,colorB));
-
-    // Asuming 5 pixel average character width
-    for (int xpos=matrix_width; xpos>-(matrix_width+text_length*5); xpos--) {
-      display.setTextColor(display.color565(colorR,colorG,colorB));
-      display.clearDisplay();
-      display.setCursor(xpos,ypos);
-      display.println(text);
-      delay(scroll_delay);
-      yield();
-
-      // This might smooth the transition a bit if we go slow
-      // display.setTextColor(display.color565(colorR/4,colorG/4,colorB/4));
-      // display.setCursor(xpos-1,ypos);
-      // display.println(text);
-
-      delay(scroll_delay/5);
-      yield();
-    }
 }
 
 void reconnect() {  
@@ -199,7 +204,7 @@ void reconnect() {
     display.clearDisplay();
     display.drawPixel(0, 0, myRED);
     
-    int path_len = mqtt_pub_str.length() + 1;
+    int path_len = mqtt_topic_state.length() + 1;
     char mqtt_pub_chr[path_len];
     String clientId = HOSTNAME;
     clientId += String(random(0xffff), HEX);
@@ -208,14 +213,12 @@ void reconnect() {
       Serial.println("MQTT connected");
       display.clearDisplay();
       display.drawPixel(0, 0, myGREEN);
-      client.subscribe((mqtt_base_path + "/Test").c_str());
+      client.subscribe(mqtt_topic_cmd.c_str());
 
-      path_len = mqtt_pub_str.length() + 1;
-      mqtt_pub_str.toCharArray(mqtt_pub_chr, path_len);
-      client.publish(mqtt_pub_chr,"Get Data");
+      path_len = mqtt_topic_state.length() + 1;
+      mqtt_topic_state.toCharArray(mqtt_pub_chr, path_len);
+      client.publish(mqtt_pub_chr,"ready");
       client.setCallback(callback);
-      //VARIABLE status BEI START AUF 1, DAMIT DIREKT DIE DATEN ANGEZEIGT WERDEN
-      status = 1;
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -233,7 +236,7 @@ void setup() {
   
   display.begin(16);
   display.clearDisplay();
-  display.setRotate(true);
+  display.setRotate(DISPLAY_ROTATE);
 
   Serial.print("Pixel draw latency in us: ");
   unsigned long start_timer = micros();
@@ -277,15 +280,6 @@ void setup() {
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-}
-
-void send_message(){
-  int path_len = mqtt_pub_str.length() + 1;
-  char mqtt_pub_chr[path_len];
-
-  path_len = mqtt_pub_str.length() + 1;
-  mqtt_pub_str.toCharArray(mqtt_pub_chr, path_len);
-  client.publish(mqtt_pub_chr,"Get Data");
 }
 
 void loop() {

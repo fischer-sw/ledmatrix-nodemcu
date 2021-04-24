@@ -10,3 +10,7 @@
 #define MQTT_PORT 1883
 #define MQTT_USER "mqtt"
 #define MQTT_PASSWORD "mqtt_password"
+
+/* Display setup */
+
+#define DISPLAY_ROTATE false
